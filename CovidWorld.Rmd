@@ -1,0 +1,428 @@
+---
+title: "ANÁLISE DOS DADOS GLOBAIS DE COVID-19"
+author: "Alex F. Viana"
+date: "`r format (Sys.time(), '%d de %B, %Y')`"
+output:
+    html_document:
+        highlight: textmate
+        theme: flatly
+        number_sections: yes
+        toc: yes
+        toc_float:
+            collapsed: yes
+            smooth_scroll: no
+---
+
+# Fonte  
+  
+O Dataset em questão trata-se de uma **série temporal de casos e óbitos globais**, provenientes dos dados da **Johns Hopkins University CSSE COVID-19** e também do **The New York Times**, publicados e atualizados diariamente no **data.world**, disponibilizado pelo endereço <https://data.world/covid-19-data-resource-hub/covid-19-case-counts>.
+
+Para auxílio na elaboração de indicadores, foi utilizada uma planilha auxiliar elaborada a partir das informações do site **worldometers** <https://www.worldometers.info/world-population/population-by-country/>, e com o "de para" dos nomes dos países, permitindo a melhor integração entre ambas as fontes.
+  
+  
+# Bibliotecas
+
+Carregamento das bibliotecas para manipulação dos dados:
+
+```{r carregamento dos bibliotecas, message=FALSE, warning=FALSE}
+library(readr)
+library(dplyr)
+library(readxl)
+library(Amelia)
+library(zoo)
+library(ggplot2)
+library(knitr)
+library(rmarkdown)
+library(kableExtra)
+```
+
+
+# Carregamento dos dados {.tabset .tabset-fade}
+
+```{r carregamento dos dados, include=FALSE}
+
+setwd("C:/Users/alexf/OneDrive/Documentos/Data_Science/Projetos/R_Projects/R_Covid")
+
+df_original <- read_csv("C:/Users/alexf/OneDrive/Documentos/GitHub/Covid-19_World/COVID-19 Activity.csv")
+
+df_info <- read_xlsx ("C:/Users/alexf/OneDrive/Documentos/GitHub/Covid-19_World/World Data Base.xlsx")
+
+```
+  
+Visualização da estrutura dos arquivos 
+
+## "COVID-19 Activity.csv"
+```{r visualização df_original, echo=FALSE, message=FALSE, warning=FALSE, paged.print=TRUE}
+glimpse(df_original)
+
+```
+  
+  
+## "World Data Base.xlsx"
+
+```{r visualização df_pop, echo=FALSE, message=FALSE, warning=FALSE}
+
+df_info <- as_tibble(df_info)
+
+glimpse(df_info)
+```
+
+  
+# Manipulação dos dados
+
+## Adequação dos dataframes
+  
+Retrabalhando o dataframe  "df_original" renomeando as colunas e deixando-o mais enxuto.
+  
+```{r}
+df_original <- df_original %>%
+  select(country = COUNTRY_SHORT_NAME,
+         data = REPORT_DATE,
+         novos_obitos = PEOPLE_DEATH_NEW_COUNT,
+         total_obitos = PEOPLE_DEATH_COUNT,
+         novos_casos = PEOPLE_POSITIVE_NEW_CASES_COUNT,
+         total_casos = PEOPLE_POSITIVE_CASES_COUNT
+         )
+
+kable(head(df_original,10)) %>%
+  kable_styling(full_width = F, bootstrap_options = c("striped", "hover", "condensed"))
+```
+  
+Padronizando o nome das colunas do dataframe "df_info" e eliminando as colunas excedentes
+  
+```{r}
+df_info <- df_info %>%
+  select(country = `Country (or dependency)`,
+         pais = `País (pt)`,
+         habitantes = `Population 2020`,
+         continente = Region,
+         )
+
+kable(head(df_info,10))  %>%
+  kable_styling(full_width = F, bootstrap_options = c("striped", "hover", "condensed"))
+  
+```
+## Consolidação dos dados
+  
+Criação do dataframe "df_master" a partir da união dos dois dataframes e com a inclusão de novos indicadores
+
+```{r message=FALSE}
+df_master <- left_join(df_original, df_info, by = "country") %>%
+  group_by(pais, continente, data) %>%
+  summarise(country = first(country),
+            novos_obitos = sum(novos_obitos), 
+            total_obitos = sum(total_obitos), 
+            novos_casos = sum(novos_casos), 
+            total_casos = sum(total_casos),
+            habitantes = mean(habitantes)
+            ) %>%
+  mutate(novos_obitos_MH = round((1000000 * novos_obitos / habitantes),2),
+         total_obitos_MH = round((1000000 * total_obitos / habitantes),2),
+         novos_casos_MH = round((1000000 * novos_casos / habitantes),2),
+         total_casos_MH = round((1000000 * total_casos / habitantes),2),
+         letalidade = round(if_else(total_casos == 0,
+                                    0,
+                                    total_obitos / total_casos
+                           ) * 100 , 2) 
+         ) %>%
+  arrange(pais,desc(data))
+
+glimpse(df_master)
+```
+## Verificação de inconsistências
+
+Verificação de inconsistências após a união dos dataframes
+
+```{r warning=FALSE}
+sum(is.na(df_master))
+
+missmap(df_master, 
+        main = "Base de Dados Consolidada - Mapa de Dados Missing", 
+        col = c("red", "gray"), 
+        legend = FALSE)
+
+```
+
+Identificação dos países que ficaram com informações em branco no data frame
+
+```{r message=FALSE}
+paises_na <- df_master %>%
+  select(country, pais) %>%
+  group_by(country) %>%
+  summarise(pais = first(pais))  %>%
+  filter(is.na(pais))
+
+kable(paises_na) %>%
+  kable_styling(full_width = F, bootstrap_options = c("striped", "hover", "condensed"))
+```
+Eliminação das divergências com a exclusão das linhas dos `r nrow(paises_na)` paises cujas informações não foram encontradas.
+
+```{r}
+df_master <- df_master %>%
+  filter(pais != "")
+
+sum(is.na(df_master ))
+
+```
+## Inclusão das médias móveis
+  
+Inclusão dos indicadores de médias móveis para óbitos, óbitos por milhão, casos e casos por milhão
+ 
+```{r}
+
+df_master$obitos_MM7d <- round(
+  rollmean(df_master$novos_obitos,7,na.pad = TRUE, align = "left") ,2)
+
+
+df_master$obitos_MM7d_1MH <- round(
+  rollmean(df_master$novos_obitos_MH,7,na.pad = TRUE, align = "left") ,2)
+
+df_master$casos_MM7d <- round(
+  rollmean(df_master$novos_casos,7,na.pad = TRUE, align = "left") ,2)
+
+
+df_master$casos_MM7d_1MH <- round(
+  rollmean(df_master$novos_casos_MH,7,na.pad = TRUE, align = "left") ,2)
+
+glimpse(df_master)
+
+```
+
+
+
+# Visualização dos dados 
+
+## Tabelas de síntese {.tabset .tabset-fade}
+  
+Função para apresentação dos dados em formato de tabela
+  
+```{r echo=TRUE}
+tabela_sint <- function(dfx) {
+  kable(
+    head(
+      dfx %>%
+        group_by(pais) %>%
+        summarise(obitos = sum(novos_obitos),
+                  obitos_1M_hab = sum(novos_obitos_MH),
+                  casos = sum(novos_casos),
+                  casos_1M_hab = max(total_casos_MH),
+                  obitos_MM7d_1MH = first(obitos_MM7d_1MH),
+                  casos_MM7d_1MH = first(casos_MM7d_1MH),
+                  habitantes = mean(habitantes)
+                  ) %>%
+        arrange(desc(obitos_MM7d_1MH))
+    ,15)
+  ) %>%
+    kable_styling(full_width = F, bootstrap_options = c("striped", "hover"))
+}
+```
+  
+Top 15 dos paises com maior média de óbitos nos últimos 7 dias - Informações globais e por continente.
+  
+### Global
+```{r}
+tabela_sint(df_master)
+```
+
+### Ásia
+```{r}
+tabela_sint(df_master[which(df_master$continente == "Ásia"),])
+```
+
+### Europa
+```{r}
+tabela_sint(df_master[which(df_master$continente == "Europa"),])
+```
+
+### América Central/Norte
+```{r}
+tabela_sint(df_master[which(df_master$continente == "América do Norte" |
+                         df_master$continente == "América Central"),])
+```
+
+### América do Sul
+```{r}
+tabela_sint(df_master[which(df_master$continente == "América do Sul"),])
+```
+
+### África
+```{r}
+tabela_sint(df_master[which(df_master$continente == "África"),])
+```
+
+## Evolução dos óbitos por Covid-19 {.tabset .tabset-fade}
+  
+Análise da evolução do número de óbitos por milhão de habitantes ao longo do tempo.
+
+### Global
+
+```{r echo=TRUE}
+
+df_master %>%
+  filter(data >= "2020-03-01",
+         pais == "Brasil" | pais == "Índia" | pais == "Estados Unidos" | pais == "Reino Unido" | pais == "Itália"
+         ) %>%
+  ggplot(aes(data, obitos_MM7d_1MH, colour = pais)) +
+  geom_line() +
+  xlab("Data") + ylab("Óbitos") +
+  labs(title = "Óbitos por Milhão de Habitantes - Média Móvel")
+```
+  
+### Ásia
+
+```{r echo=TRUE}
+
+df_master %>%
+  filter(data >= "2020-03-01",
+         pais == "Índia" | pais == "China" | pais == "Irã" | pais == "Bahrain" | pais == "Israel"
+         ) %>%
+  ggplot(aes(data, obitos_MM7d_1MH, colour = pais)) +
+  geom_line() +
+  xlab("Data") + ylab("Óbitos") +
+  labs(title = "Óbitos por Milhão de Habitantes - Média Móvel")
+```
+  
+### Europa
+
+```{r echo=TRUE}
+
+df_master %>%
+  filter(data >= "2020-03-01",
+         pais == "Alemanha" | pais == "Reino Unido" | pais == "Itália" | pais == "França" | pais == "Hungria"
+         ) %>%
+  ggplot(aes(data, obitos_MM7d_1MH, colour = pais)) +
+  geom_line() +
+  xlab("Data") + ylab("Óbitos") +
+  labs(title = "Óbitos por Milhão de Habitantes - Média Móvel")
+```
+  
+### América Central/Norte
+
+```{r echo=TRUE}
+
+df_master %>%
+  filter(data >= "2020-03-01",
+         pais == "Estados Unidos" | pais == "Canadá" | pais == "México" | pais == "Costa Rica" | pais == "Trinidad e Tobago"
+         ) %>%
+  ggplot(aes(data, obitos_MM7d_1MH, colour = pais)) +
+  geom_line() +
+  xlab("Data") + ylab("Óbitos") +
+  labs(title = "Óbitos por Milhão de Habitantes - Média Móvel")
+```
+  
+### América do Sul
+
+```{r echo=TRUE}
+
+df_master %>%
+  filter(data >= "2020-03-01",
+         pais == "Brasil" | pais == "Argentina" | pais == "Paraguai" | pais == "Colômbia" | pais == "Uruguai" |  pais == "Chile"
+         ) %>%
+  ggplot(aes(data, obitos_MM7d_1MH, colour = pais)) +
+  geom_line() +
+  xlab("Data") + ylab("Óbitos") +
+  labs(title = "Óbitos por Milhão de Habitantes - Média Móvel")
+```
+  
+### África
+
+```{r echo=TRUE}
+
+df_master %>%
+  filter(data >= "2020-03-01",
+         pais == "África do Sul" | pais == "Egito" | pais == "Marrocos" | pais == "Nigéria" | pais == "Quênia" |  pais == "Tunísia"
+         ) %>%
+  ggplot(aes(data, obitos_MM7d_1MH, colour = pais)) +
+  geom_line() +
+  xlab("Data") + ylab("Óbitos") +
+  labs(title = "Óbitos por Milhão de Habitantes - Média Móvel")
+```
+
+
+## Evolução dos casos por Covid-19 {.tabset .tabset-fade}
+  
+Análise da evolução do número de casos por milhão de habitantes ao longo do tempo.
+
+### Global
+
+```{r echo=TRUE}
+
+df_master %>%
+  filter(data >= "2020-03-01",
+         pais == "Brasil" | pais == "Índia" | pais == "Estados Unidos" | pais == "Reino Unido" | pais == "Itália"
+         ) %>%
+  ggplot(aes(data, casos_MM7d_1MH, colour = pais)) +
+  geom_line() +
+  xlab("Data") + ylab("Casos") +
+  labs(title = "Casos por Milhão de Habitantes - Média Móvel")
+```
+  
+### Ásia
+
+```{r echo=TRUE}
+
+df_master %>%
+  filter(data >= "2020-03-01",
+         pais == "Índia" | pais == "China" | pais == "Irã" | pais == "Bahrain" | pais == "Israel"
+         ) %>%
+  ggplot(aes(data, casos_MM7d_1MH, colour = pais)) +
+  geom_line() +
+  xlab("Data") + ylab("Casos") +
+  labs(title = "Casos por Milhão de Habitantes - Média Móvel")
+```
+  
+### Europa
+
+```{r echo=TRUE}
+
+df_master %>%
+  filter(data >= "2020-03-01",
+         pais == "Alemanha" | pais == "Reino Unido" | pais == "Itália" | pais == "França" | pais == "Hungria"
+         ) %>%
+  ggplot(aes(data, casos_MM7d_1MH, colour = pais)) +
+  geom_line() +
+  xlab("Data") + ylab("Casos") +
+  labs(title = "Casos por Milhão de Habitantes - Média Móvel")
+```
+  
+### América Central/Norte
+
+```{r echo=TRUE}
+
+df_master %>%
+  filter(data >= "2020-03-01",
+         pais == "Estados Unidos" | pais == "Canadá" | pais == "México" | pais == "Costa Rica" | pais == "Trinidad e Tobago"
+         ) %>%
+  ggplot(aes(data, casos_MM7d_1MH, colour = pais)) +
+  geom_line() +
+  xlab("Data") + ylab("Casos") +
+  labs(title = "Casos por Milhão de Habitantes - Média Móvel")
+```
+  
+### América do Sul
+
+```{r echo=TRUE}
+
+df_master %>%
+  filter(data >= "2020-03-01",
+         pais == "Brasil" | pais == "Argentina" | pais == "Paraguai" | pais == "Colômbia" | pais == "Uruguai" |  pais == "Chile"
+         ) %>%
+  ggplot(aes(data, casos_MM7d_1MH, colour = pais)) +
+  geom_line() +
+  xlab("Data") + ylab("Casos") +
+  labs(title = "Casos por Milhão de Habitantes - Média Móvel")
+```
+  
+### África
+
+```{r echo=TRUE}
+
+df_master %>%
+  filter(data >= "2020-03-01",
+         pais == "África do Sul" | pais == "Egito" | pais == "Marrocos" | pais == "Nigéria" | pais == "Quênia" |  pais == "Tunísia"
+         ) %>%
+  ggplot(aes(data, casos_MM7d_1MH, colour = pais)) +
+  geom_line() +
+  xlab("Data") + ylab("Casos") +
+  labs(title = "Casos por Milhão de Habitantes - Média Móvel")
+```
